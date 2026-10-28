@@ -429,17 +429,39 @@ function drawWait(){
   }
   app.innerHTML='<main class="screen">'+top('multi')+'<div class="card center"><p class="muted">Room code</p><div class="codebig">'+M.code+'</div>'+
   '<p class="muted">Send your friend the link or the code.</p><div class="spin" role="status" aria-label="Waiting"></div><h2>Waiting for a friend…</h2></div>'+
-  '<div class="stack"><button class="btn go" data-act="share">Share link</button></div>'+
-  '<p class="linkbox">'+esc(roomLink())+'</p><p class="fb good" id="sh" role="status"></p>'+
+  '<div class="stack"><button class="btn go" data-act="share">Copy link</button>'+
+  (navigator.share?'<button class="btn alt" data-act="send">Send with…</button>':'')+'</div>'+
+  '<div class="field"><span>Or copy this link</span><input id="lk" readonly value="'+esc(roomLink())+'"></div><p class="fb good" id="sh" role="status"></p>'+
   '<p class="note">Keep this page open until your friend joins.</p></main>';
+  var lk=$('#lk');if(lk)lk.addEventListener('focus',function(){lk.select()});
 }
+function copyText(t,cb){
+  function fallback(){
+    try{
+      var ta=document.createElement('textarea');
+      ta.value=t;ta.setAttribute('readonly','');
+      ta.style.cssText='position:fixed;top:0;left:0;opacity:0';
+      document.body.appendChild(ta);ta.focus();ta.select();ta.setSelectionRange(0,t.length);
+      var ok=document.execCommand('copy');
+      document.body.removeChild(ta);cb(!!ok);
+    }catch(e){cb(false)}
+  }
+  try{
+    if(navigator.clipboard&&navigator.clipboard.writeText)navigator.clipboard.writeText(t).then(function(){cb(true)},fallback);
+    else fallback();
+  }catch(e){fallback()}
+}
+function say(t){var s=$('#sh');if(s)s.textContent=t}
 function share(){
   if(!M)return;
-  var url=roomLink();
-  function done(t){var s=$('#sh');if(s)s.textContent=t}
-  if(navigator.share){navigator.share({title:"Hikaru's math",text:'Battle me in Hikaru\'s math! Room '+M.code,url:url}).catch(function(){})}
-  else if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(url).then(function(){done('Link copied!')},function(){done('Copy the link below.')})}
-  else done('Copy the link below.');
+  copyText(roomLink(),function(ok){say(ok?'Link copied! Paste it to your friend.':'Could not copy. Tap the link below, then copy it.')});
+}
+function sendLink(){
+  if(!M)return;
+  try{
+    var r=navigator.share({title:"Hikaru's math",text:'Battle me! Room '+M.code,url:roomLink()});
+    if(r&&r.catch)r.catch(function(){});
+  }catch(e){share()}
 }
 
 /* host: makes the room and decides every question and every result */
@@ -644,6 +666,7 @@ function act(a,v){
   else if(a==='mk')createRoom(+v);
   else if(a==='join'){readName();var cd=(($('#code')||{}).value||'').replace(/\D/g,'');if(cd.length!==4)drawFriend('Enter the 4-digit room code.',cd);else joinRoom(cd)}
   else if(a==='share')share();
+  else if(a==='send')sendLink();
   else if(a==='mrematch')rematch();
 }
 app.addEventListener('click',function(e){
