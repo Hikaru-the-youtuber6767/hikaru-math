@@ -106,9 +106,15 @@ p{margin:0;line-height:1.45}
 .row .ct{display:flex;align-items:center;gap:6px;font-weight:800;font-variant-numeric:tabular-nums}
 .ping{display:flex;justify-content:space-between;gap:10px}
 .note{font-size:13px;color:var(--muted)}
+.field{display:flex;flex-direction:column;gap:6px;font-weight:800}
+.field input{font:inherit;font-weight:800;padding:12px 14px;border:3px solid var(--edge);border-radius:14px;background:var(--card);color:var(--ink);min-width:0;width:100%}
+.field input:focus-visible{outline:3px solid var(--gold);outline-offset:2px}
+.codebig{font-family:var(--display);font-size:clamp(56px,18vw,88px);letter-spacing:.08em;line-height:1;color:var(--blue)}
+.linkbox{font-size:13px;word-break:break-all;color:var(--muted)}
 @media (prefers-reduced-motion:reduce){.spin{animation-duration:3s}.shake{animation:none}.meter i{transition:none}}
 </style>
 <div id="app"></div>
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
 <script>
 (function(){
 var app=document.getElementById('app');
@@ -116,7 +122,7 @@ function $(s){return document.querySelector(s)}
 function rnd(a,b){return Math.floor(Math.random()*(b-a+1))+a}
 
 /* saved progress (this browser only) */
-var save={coins:0,played:0,wins:0};
+var save={coins:0,played:0,wins:0,name:''};
 try{var s0=JSON.parse(localStorage.getItem('hikaru-math')||'null');if(s0&&typeof s0.coins==='number'){save=s0}}catch(e){}
 function persist(){try{localStorage.setItem('hikaru-math',JSON.stringify(save))}catch(e){}}
 
@@ -167,10 +173,10 @@ function gen(l){
 }
 
 /* timers and state */
-var timers=[],G=null,B=null,lastLevel=0;
+var timers=[],G=null,B=null,M=null,lastLevel=0;
 function later(fn,ms){var id=setTimeout(fn,ms);timers.push(id);return id}
 function every(fn,ms){var id=setInterval(fn,ms);timers.push(id);return id}
-function stopAll(){timers.forEach(function(id){clearTimeout(id);clearInterval(id)});timers=[];G=null;B=null}
+function stopAll(){timers.forEach(function(id){clearTimeout(id);clearInterval(id)});timers=[];leaveRoom();G=null;B=null}
 
 function board(){
   var l=BOTS.map(function(b){return{n:b.n,c:b.c,me:false}});
@@ -201,7 +207,7 @@ function drawHome(){
   app.innerHTML='<main class="screen">'+top()+
   '<div class="brand"><div class="sum" aria-hidden="true"><span>7 × 8</span><b>=</b><span>56</span></div><h1>Hikaru\'s math</h1><p class="muted">Answer fast, earn coins, and climb to number 1.</p></div>'+
   '<div class="stack"><button class="btn" data-act="single">Singleplayer<small>Five levels, from Easy to Very Very Hard</small></button>'+
-  '<button class="btn alt" data-act="multi">Multiplayer<small>Battle another player</small></button></div>'+
+  '<button class="btn alt" data-act="multi">Multiplayer<small>Battle a friend online, or practice vs CPU</small></button></div>'+
   '<button class="chip" data-act="ranks">Rank #'+r+' of '+(BOTS.length+1)+' · see the leaderboard</button></main>';
 }
 function drawLevels(){
@@ -216,9 +222,10 @@ function drawLevels(){
 function drawMulti(){
   stopAll();
   app.innerHTML='<main class="screen">'+top('home')+'<h2>Multiplayer</h2>'+
-  '<div class="stack"><button class="btn go" data-act="find">Battle<small>Find a player and race to the answer. Best of 5 rounds.</small></button>'+
+  '<div class="stack"><button class="btn go" data-act="friend">Battle a friend<small>Make a room, send the link, race to the answer. Best of 5 rounds.</small></button>'+
+  '<button class="btn" data-act="find">Practice vs CPU<small>Solo practice against computer players</small></button>'+
   '<button class="btn alt" data-act="ranks">Leaderboard</button></div>'+
-  '<p class="note">The other players in the lobby are practice opponents controlled by the game, so someone is always around to battle.</p></main>';
+  '<p class="note">Friend battles are live between two devices. The CPU players are practice opponents controlled by the game. Coins and the leaderboard are saved on this device only.</p></main>';
 }
 
 /* single player */
@@ -367,6 +374,239 @@ function finishBattle(){
   stopAll();app.innerHTML=h;
 }
 
+/* online friend battle: peer to peer between two browsers, no server of our own */
+var PREFIX='hikaru-math-';
+function esc(s){return String(s).replace(/[&<>"']/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
+function cleanName(s){s=String(s==null?'':s).replace(/[\u0000-\u001f]/g,'').trim().slice(0,12);return s||'Player'}
+function myName(){return cleanName(save.name)}
+function readName(){var el=$('#nm');if(el){save.name=cleanName(el.value);persist()}}
+function leaveRoom(){
+  if(!M)return;
+  var m=M;M=null;
+  try{if(m.conn)m.conn.close()}catch(e){}
+  try{if(m.peer)m.peer.destroy()}catch(e){}
+}
+function send(o){try{if(M&&M.conn&&M.conn.open)M.conn.send(o)}catch(e){}}
+function needPeer(){
+  if(typeof Peer==='undefined'){drawFriend('Online play could not load. Check your internet and reload the page.');return false}
+  return true;
+}
+function netError(e){
+  var t=e&&e.type;
+  drawFriend(t==='network'||t==='server-error'||t==='socket-error'||t==='socket-closed'||t==='disconnected'
+    ?'Cannot reach the connection server. Check your internet and try again.'
+    :'Something went wrong with the connection. Please try again.');
+}
+function roomLink(){return location.href.split('#')[0].split('?')[0]+'#room='+M.code}
+
+function drawFriend(msg,code){
+  stopAll();
+  app.innerHTML='<main class="screen">'+top('multi')+'<h2>Battle a friend</h2>'+
+  '<p class="muted">You and your friend both open this page. One of you makes a room and shares the link or the 4-digit code.</p>'+
+  '<label class="field"><span>Your name</span><input id="nm" maxlength="12" autocomplete="off" placeholder="Player" value="'+esc(save.name||'')+'"></label>'+
+  (msg?'<p class="fb bad" role="alert">'+esc(msg)+'</p>':'')+
+  '<div class="stack"><button class="btn go" data-act="create">Create a room<small>You pick the level</small></button>'+
+  '<div class="card"><label class="field"><span>Have a code? Join a room</span><input id="code" inputmode="numeric" pattern="[0-9]*" maxlength="4" autocomplete="off" placeholder="1234" value="'+(code||'')+'"></label>'+
+  '<button class="btn" data-act="join">Join room</button></div></div></main>';
+}
+function drawCreate(){
+  stopAll();
+  var h='<main class="screen">'+top('friend')+'<h2>Pick the level</h2><p class="muted">You and your friend get the same questions.</p><div class="stack">';
+  LV.forEach(function(L,i){
+    var p='';for(var j=0;j<5;j++)p+='<i'+(j<=i?' class="on"':'')+'></i>';
+    h+='<button class="lv" style="--c:'+L.c+'" data-act="mk" data-v="'+i+'"><span class="lvname">'+L.name+'</span><span class="pips" aria-hidden="true">'+p+'</span><span class="lvtag">'+L.tag+'</span></button>';
+  });
+  app.innerHTML=h+'</div></main>';
+}
+function drawMsg(h,p){
+  app.innerHTML='<main class="screen">'+top('multi')+'<div class="card center"><h2>'+esc(h)+'</h2><p class="muted">'+esc(p)+'</p></div></main>';
+}
+function drawWait(){
+  if(!M)return;
+  if(!M.ready){
+    app.innerHTML='<main class="screen">'+top('multi')+'<div class="card center"><div class="spin" role="status" aria-label="Setting up"></div><h2>Setting up the room…</h2></div></main>';
+    return;
+  }
+  app.innerHTML='<main class="screen">'+top('multi')+'<div class="card center"><p class="muted">Room code</p><div class="codebig">'+M.code+'</div>'+
+  '<p class="muted">Send your friend the link or the code.</p><div class="spin" role="status" aria-label="Waiting"></div><h2>Waiting for a friend…</h2></div>'+
+  '<div class="stack"><button class="btn go" data-act="share">Share link</button></div>'+
+  '<p class="linkbox">'+esc(roomLink())+'</p><p class="fb good" id="sh" role="status"></p>'+
+  '<p class="note">Keep this page open until your friend joins.</p></main>';
+}
+function share(){
+  if(!M)return;
+  var url=roomLink();
+  function done(t){var s=$('#sh');if(s)s.textContent=t}
+  if(navigator.share){navigator.share({title:"Hikaru's math",text:'Battle me in Hikaru\'s math! Room '+M.code,url:url}).catch(function(){})}
+  else if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(url).then(function(){done('Link copied!')},function(){done('Copy the link below.')})}
+  else done('Copy the link below.');
+}
+
+/* host: makes the room and decides every question and every result */
+function createRoom(l,tries){
+  if(!needPeer())return;
+  stopAll();
+  tries=tries||0;
+  var code=''+rnd(1000,9999);
+  M={host:true,code:code,l:l,live:false,ready:false,submit:submitM};
+  drawWait();
+  var p=new Peer(PREFIX+code);
+  M.peer=p;
+  p.on('open',function(){if(M&&M.peer===p){M.ready=true;drawWait()}});
+  p.on('error',function(e){
+    if(!M||M.peer!==p)return;
+    if(e&&e.type==='unavailable-id'&&tries<5){createRoom(l,tries+1);return}
+    netError(e);
+  });
+  p.on('connection',onConn);
+}
+function onConn(c){
+  if(!M||!M.host)return;
+  if(M.conn&&M.conn.open){
+    c.on('open',function(){try{c.send({t:'full'})}catch(e){}setTimeout(function(){try{c.close()}catch(e){}},500)});
+    return;
+  }
+  M.conn=c;
+  c.on('data',onData);
+  c.on('close',function(){onClose(c)});
+  c.on('error',function(){onClose(c)});
+}
+/* guest: joins with the room code */
+function joinRoom(code){
+  if(!needPeer())return;
+  stopAll();
+  M={host:false,code:code,live:false,submit:submitM};
+  app.innerHTML='<main class="screen">'+top('multi')+'<div class="card center"><div class="spin" role="status" aria-label="Joining"></div><h2>Joining room '+code+'…</h2></div></main>';
+  var p=new Peer();
+  M.peer=p;
+  p.on('open',function(){
+    if(!M||M.peer!==p)return;
+    var c=p.connect(PREFIX+code,{reliable:true});
+    M.conn=c;
+    c.on('open',function(){send({t:'hello',name:myName()})});
+    c.on('data',onData);
+    c.on('close',function(){onClose(c)});
+    c.on('error',function(){onClose(c)});
+  });
+  p.on('error',function(e){
+    if(!M||M.peer!==p)return;
+    if(e&&e.type==='peer-unavailable')drawFriend('Room not found. Check the code, and ask your friend to keep the room page open.');
+    else netError(e);
+  });
+  later(function(){if(M&&M.peer===p&&!M.opp)drawFriend('Could not connect. Check the code and try again.')},15000);
+}
+
+function onData(d){
+  if(!M||!d||typeof d!=='object')return;
+  if(M.host){
+    if(d.t==='hello'&&!M.opp){
+      M.opp=cleanName(d.name);
+      send({t:'welcome',name:myName()});
+      M.rounds=5;M.r=0;M.you=0;M.them=0;M.rewarded=false;M.done=false;
+      drawMsg(M.opp+' joined!','Get ready…');
+      later(hostRound,1600);
+    }else if(d.t==='ans'&&M.live&&!M.over&&d.r===M.r){
+      if(+d.v===M.q.a)endMRound('guest');else send({t:'wrong',r:M.r});
+    }
+  }else{
+    if(d.t==='welcome'){M.opp=cleanName(d.name);drawMsg('Joined '+M.opp+'\'s room!','Get ready…')}
+    else if(d.t==='round'&&typeof d.q==='string'&&d.r>=1){
+      if(d.r===1){M.you=0;M.them=0;M.rewarded=false;M.done=false}
+      M.r=d.r|0;M.rounds=(d.n|0)||5;
+      showRound(d.q);
+    }
+    else if(d.t==='wrong'&&d.r===M.r&&M.live&&!M.over)wrongFx();
+    else if(d.t==='result'&&d.r===M.r){M.you=+d.gs||0;M.them=+d.hs||0;roundResult(d.w,+d.a)}
+    else if(d.t==='end'){M.you=+d.gs||0;M.them=+d.hs||0;showEnd()}
+    else if(d.t==='full')drawFriend('That room already has two players.');
+  }
+}
+function onClose(c){
+  if(!M)return;
+  if(c&&M.conn&&M.conn!==c)return;
+  if(M.done){M.gone=true;showEnd();return}
+  if(M.host&&!M.opp){M.conn=null;return}
+  M.gone=true;M.live=false;clearInterval(M.tick);
+  app.innerHTML='<main class="screen">'+top('multi')+'<div class="card center"><h2>'+esc(M.opp||'Your friend')+' left</h2><p class="muted">The connection closed.</p></div>'+
+  '<div class="stack"><button class="btn" data-act="friend">Back to Battle a friend</button></div></main>';
+}
+
+function hostRound(){
+  if(!M||!M.host||M.gone)return;
+  if(M.r>=M.rounds){send({t:'end',hs:M.you,gs:M.them});showEnd();return}
+  M.r++;M.q=gen(M.l);
+  send({t:'round',r:M.r,q:M.q.t,n:M.rounds});
+  showRound(M.q.t);
+}
+function showRound(text){
+  clearInterval(M.tick);
+  M.input='';M.over=false;M.live=true;M.locked=false;M.t0=Date.now();M.limit=40000;
+  app.innerHTML='<main class="screen">'+top('multi')+
+  '<div class="score"><span>You</span><b id="sc">'+M.you+' – '+M.them+'</b><span>'+esc(M.opp)+'</span></div>'+
+  '<div class="qmeta"><span>Round '+M.r+' of '+M.rounds+'</span><span>First to answer wins</span></div>'+
+  '<div class="meter" aria-hidden="true"><i id="bar"></i></div>'+
+  '<div class="qcard" id="qcard"><div class="q">'+esc(text)+'</div><div class="ans empty" id="ans">?</div></div>'+
+  '<div class="fb" id="fb" role="status"></div>'+pad()+'</main>';
+  M.tick=every(tickM,100);
+}
+function tickM(){
+  if(!M||M.over)return;
+  var el=Date.now()-M.t0,bar=$('#bar');
+  if(bar)bar.style.width=Math.max(0,100-el/M.limit*100)+'%';
+  if(M.host&&el>=M.limit)endMRound('none');
+}
+function wrongFx(){
+  var c=$('#qcard');
+  if(c){c.classList.remove('shake');void c.offsetWidth;c.classList.add('shake')}
+  fb('Not that one. Try again!','bad');
+}
+function submitM(){
+  if(!M||!M.live||M.over||!M.input)return;
+  if(M.host){
+    if(+M.input===M.q.a)endMRound('host');
+    else{M.input='';showInput();wrongFx()}
+  }else{
+    send({t:'ans',r:M.r,v:M.input});
+    M.input='';showInput();
+  }
+}
+function endMRound(w){
+  if(!M||M.over)return;
+  if(w==='host')M.you++;else if(w==='guest')M.them++;
+  send({t:'result',r:M.r,w:w,a:M.q.a,hs:M.you,gs:M.them});
+  roundResult(w,M.q.a);
+  later(hostRound,2000);
+}
+function roundResult(w,a){
+  M.over=true;M.live=false;clearInterval(M.tick);
+  var mine=(M.host&&w==='host')||(!M.host&&w==='guest'),m;
+  if(mine){save.coins+=5;persist();setCoins();m='You got it first! +5 coins'}
+  else if(w==='none')m='Time is up. The answer is '+a;
+  else m=M.opp+' got it first. The answer is '+a;
+  var sc=$('#sc');if(sc)sc.textContent=M.you+' – '+M.them;
+  fb(m,mine?'good':'bad');
+}
+function showEnd(){
+  M.done=true;M.live=false;clearInterval(M.tick);
+  var win=M.you>M.them,draw=M.you===M.them;
+  if(!M.rewarded){
+    M.rewarded=true;M.reward=win?30:draw?10:5;
+    save.coins+=M.reward;save.played++;if(win)save.wins++;persist();
+  }
+  app.innerHTML='<main class="screen">'+top('multi')+'<div class="card center"><h2>'+(win?'You beat '+esc(M.opp)+'!':draw?'It\'s a draw with '+esc(M.opp):esc(M.opp)+' won this time')+'</h2>'+
+  '<div class="big">'+M.you+' – '+M.them+'</div><div class="ping"><span>Match reward</span><b>+'+M.reward+'</b></div></div>'+
+  '<div class="stack">'+
+  (M.gone?'<p class="note">'+esc(M.opp)+' has left the room.</p>'
+    :M.host?'<button class="btn go" data-act="mrematch">Play again</button>'
+    :'<p class="note">Waiting for '+esc(M.opp)+' to start another match…</p>')+
+  '<button class="btn alt" data-act="multi">Leave room</button></div></main>';
+}
+function rematch(){
+  if(!M||!M.host||M.gone||!M.done)return;
+  M.r=0;M.you=0;M.them=0;M.rewarded=false;M.done=false;
+  hostRound();
+}
+
 function drawRanks(){
   stopAll();
   var l=board(),h='<main class="screen">'+top('home')+'<h2>Leaderboard</h2>'+
@@ -378,7 +618,7 @@ function drawRanks(){
 }
 
 /* input */
-function cur(){return G&&G.mode==='s'?G:(B&&B.live?B:null)}
+function cur(){return G&&G.mode==='s'?G:(B&&B.live?B:(M&&M.live?M:null))}
 function showInput(){
   var c=cur(),el=$('#ans');if(!c||!el)return;
   el.textContent=c.input||'?';el.className='ans'+(c.input?'':' empty');
@@ -399,6 +639,12 @@ function act(a,v){
   else if(a==='other'){drawSearch('Searching for a player…');later(tryNext,1200)}
   else if(a==='challenge')challenge();
   else if(a==='ranks')drawRanks();
+  else if(a==='friend')drawFriend();
+  else if(a==='create'){readName();if(needPeer())drawCreate()}
+  else if(a==='mk')createRoom(+v);
+  else if(a==='join'){readName();var cd=(($('#code')||{}).value||'').replace(/\D/g,'');if(cd.length!==4)drawFriend('Enter the 4-digit room code.',cd);else joinRoom(cd)}
+  else if(a==='share')share();
+  else if(a==='mrematch')rematch();
 }
 app.addEventListener('click',function(e){
   var t=e.target.closest('[data-k],[data-act]');if(!t)return;
@@ -411,7 +657,8 @@ document.addEventListener('keydown',function(e){
   else if(e.key==='Backspace'){e.preventDefault();key('back')}
   else if(e.key==='Enter'){e.preventDefault();key('ok')}
 });
-drawHome();
+var jm=/room=(\d{4})/.exec(location.hash||'');
+if(jm)drawFriend('',jm[1]);else drawHome();
 })();
 </script>
 
