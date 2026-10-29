@@ -384,6 +384,8 @@ function topicOf(code){return 'hikaru-math6767-'+code}
 function leaveRoom(){
   if(!M||!M.code)return;
   var m=M;M=null;
+  try{if(m.es)m.es.close()}catch(e){}
+  if(m.pollTimer){clearInterval(m.pollTimer);m.pollTimer=null}
   if(!m.id)return;
   try{fetch((m.base||RELAYS[0])+'/'+topicOf(m.code),{method:'POST',body:JSON.stringify({t:'bye',from:m.id,sid:m.sid||''}),keepalive:true})}catch(e){}
 }
@@ -438,41 +440,75 @@ function onWrap(wrap,m){
   if(d.t==='full'){drawFriend('That room already has two players.',M.code);return}
   onData(d);
 }
+function takeWrap(m,wrap){
+  if(!wrap)return;
+  if(wrap.id){
+    if(m.seen[wrap.id])return;
+    m.seen[wrap.id]=1;
+  }
+  if(wrap.time&&(!m.sinceN||+wrap.time>m.sinceN))m.sinceN=+wrap.time;
+  onWrap(wrap,m);
+}
+function listen(m){
+  if(typeof EventSource==='undefined')return;
+  try{
+    var es=new EventSource(m.base+'/'+topicOf(m.code)+'/sse');
+    m.es=es;
+    es.onopen=function(){if(M===m){m.sseOk=true;m.netOk=true;m.sseErr=0}};
+    es.onmessage=function(ev){
+      if(!M||M!==m)return;
+      m.sseOk=true;m.netOk=true;m.sseErr=0;
+      var wrap;try{wrap=JSON.parse(ev.data)}catch(e){return}
+      takeWrap(m,wrap);
+    };
+    es.onerror=function(){
+      if(M!==m)return;
+      m.sseOk=false;
+      m.sseErr=(m.sseErr||0)+1;
+      if(m.sseErr>=5){try{es.close()}catch(e){}if(m.es===es)m.es=null}
+    };
+  }catch(e){}
+}
 function poll(m){
-  if(!M||M!==m)return;
-  var url=(m.base||RELAYS[0])+'/'+topicOf(m.code)+'/json?poll=1&since='+encodeURIComponent(m.since||'30s')+'&x='+Date.now();
-  fetch(url,{cache:'no-store'}).then(function(r){
+  if(!M||M!==m||m.polling)return;
+  if(m.slowUntil&&Date.now()<m.slowUntil)return;
+  m.pollN=(m.pollN||0)+1;
+  if(m.sseOk&&m.pollN%5!==0)return;
+  m.polling=true;
+  var ac=typeof AbortController!=='undefined'?new AbortController():null;
+  var killer=setTimeout(function(){try{if(ac)ac.abort()}catch(e){}},4500);
+  var since=m.sinceN?String(Math.max(0,m.sinceN-1)):String(Math.floor(Date.now()/1000)-25);
+  var opts={cache:'no-store'};
+  if(ac)opts.signal=ac.signal;
+  fetch(m.base+'/'+topicOf(m.code)+'/json?poll=1&since='+encodeURIComponent(since)+'&x='+Date.now(),opts).then(function(r){
+    if(r.status===429){if(M===m)m.slowUntil=Date.now()+10000;return ''}
     if(r.status===404||r.status===204)return '';
     if(!r.ok)throw new Error('bad');
     return r.text();
   }).then(function(text){
     if(!M||M!==m)return;
     m.netOk=true;
+    if(!text)return;
     text.split('\n').forEach(function(line){
       line=line.trim();
       if(!line)return;
       var wrap;try{wrap=JSON.parse(line)}catch(e){return}
-      if(wrap.id){
-        if(m.seen[wrap.id])return;
-        m.seen[wrap.id]=1;
-        m.since=wrap.id;
-      }
-      onWrap(wrap,m);
+      takeWrap(m,wrap);
     });
-    later(function(){poll(m)},1200);
   }).catch(function(){
-    if(!M||M!==m)return;
-    if(!m.netOk){m.pfail=(m.pfail||0)+1;if(m.pfail>=5){relayFail(m.code);return}}
-    later(function(){poll(m)},1500);
-  });
+    if(!M||M!==m||m.sseOk)return;
+    if(!m.netOk){m.pfail=(m.pfail||0)+1;if(m.pfail>=6)relayFail(m.code)}
+  }).then(function(){clearTimeout(killer);if(M===m)m.polling=false});
 }
 function beginRelay(){
   var m=M;
   if(!m||!m.base||m.started)return;
   m.started=true;
-  m.seen={};m.since='30s';
+  m.seen={};m.sinceN=Math.floor(Date.now()/1000)-25;
   if(m.host){m.ready=true;drawWait();pulse();m.pulse=every(pulse,3000)}
+  listen(m);
   poll(m);
+  m.pollTimer=setInterval(function(){poll(m)},4000);
   later(function(){if(M===m&&m.host&&!m.echo)relayFail(m.code)},10000);
 }
 function chooseRelay(i){
@@ -613,8 +649,10 @@ function onData(d){
       drawMsg('Joined '+M.opp+'\'s room!','Get ready…');
     }
     else if(d.t==='round'&&typeof d.q==='string'&&d.r>=1){
-      if(M.r===d.r&&M.live)return;
+      if((d.r|0)<M.r)return;
+      if((d.r|0)===M.r&&M.live)return;
       if(d.r===1){M.you=0;M.them=0;M.rewarded=false;M.done=false}
+      if('gs' in d){M.you=+d.gs||0;M.them=+d.hs||0}
       M.r=d.r|0;M.rounds=(d.n|0)||5;
       showRound(d.q);
     }
@@ -640,7 +678,7 @@ function hostRound(){
   if(!M||!M.host||M.gone)return;
   if(M.r>=M.rounds){send({t:'end',hs:M.you,gs:M.them});showEnd();return}
   M.r++;M.q=gen(M.l);
-  send({t:'round',r:M.r,q:M.q.t,n:M.rounds});
+  send({t:'round',r:M.r,q:M.q.t,n:M.rounds,hs:M.you,gs:M.them});
   showRound(M.q.t);
 }
 function showRound(text){
