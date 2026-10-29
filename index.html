@@ -383,7 +383,6 @@ function topicOf(code){return 'hikaru-math6767-'+code}
 function leaveRoom(){
   if(!M||!M.code)return;
   var m=M;M=null;
-  try{if(m.es)m.es.close()}catch(e){}
   if(!m.id)return;
   try{fetch('https://ntfy.sh/'+topicOf(m.code),{method:'POST',body:JSON.stringify({t:'bye',from:m.id,sid:m.sid||''}),keepalive:true})}catch(e){}
 }
@@ -412,22 +411,20 @@ function sendHello(){
   if(!M||M.host||M.opp||!M.sid)return;
   post({t:'hello',name:myName()});
 }
-function onRelay(ev,m){
-  if(!M||M!==m)return;
-  var wrap,d,raw;
-  try{wrap=JSON.parse(ev.data)}catch(e){return}
-  if(!wrap)return;
-  raw=wrap.message;
+function onWrap(wrap,m){
+  if(!M||M!==m||!wrap)return;
+  var raw=wrap.message,d;
   if(!raw)return;
   try{d=typeof raw==='string'?JSON.parse(raw):raw}catch(e){return}
   if(!d||typeof d!=='object')return;
   if(d.from===M.id){if(d.t==='up')M.echo=true;return}
   if(d.to&&d.to!==M.id)return;
   if(d.t==='up'){
-    if(M.host)return;
-    if(M.expect&&d.sid!==M.expect)return;
+    if(M.host||M.opp)return;
+    if(M.sid&&d.sid&&d.sid!==M.sid&&M.expect&&d.sid!==M.expect)return;
     M.sawHost=true;
-    if(!M.sid)M.sid=d.sid;
+    if(!M.sid||(M.expect&&d.sid===M.expect))M.sid=d.sid;
+    else if(!M.expect)M.sid=d.sid;
     if(!M.helloTimer){sendHello();M.helloTimer=every(sendHello,2000)}
     return;
   }
@@ -440,21 +437,40 @@ function onRelay(ev,m){
   if(d.t==='full'){drawFriend('That room already has two players.',M.code);return}
   onData(d);
 }
+function poll(m){
+  if(!M||M!==m)return;
+  var url='https://ntfy.sh/'+topicOf(m.code)+'/json?poll=1&since='+encodeURIComponent(m.since||'30s')+'&x='+Date.now();
+  fetch(url,{cache:'no-store'}).then(function(r){
+    if(!r.ok)throw new Error('bad');
+    return r.text();
+  }).then(function(text){
+    if(!M||M!==m)return;
+    m.netOk=true;
+    text.split('\n').forEach(function(line){
+      line=line.trim();
+      if(!line)return;
+      var wrap;try{wrap=JSON.parse(line)}catch(e){return}
+      if(wrap.id){
+        if(m.seen[wrap.id])return;
+        m.seen[wrap.id]=1;
+        m.since=wrap.id;
+      }
+      onWrap(wrap,m);
+    });
+    later(function(){poll(m)},1200);
+  }).catch(function(){
+    if(!M||M!==m)return;
+    if(!m.netOk){m.pfail=(m.pfail||0)+1;if(m.pfail>=5){relayFail(m.code);return}}
+    later(function(){poll(m)},1500);
+  });
+}
 function openRelay(){
   var m=M;
-  if(!m||typeof EventSource==='undefined'){relayFail(m&&m.code);return}
-  var es;
-  try{es=new EventSource('https://ntfy.sh/'+topicOf(m.code)+'/sse')}catch(e){relayFail(m.code);return}
-  m.es=es;
-  es.onopen=function(){
-    if(!M||M!==m)return;
-    if(m.host&&!m.ready){
-      m.ready=true;drawWait();pulse();
-      m.pulse=every(pulse,4000);
-    }
-  };
-  es.onmessage=function(ev){onRelay(ev,m)};
-  later(function(){if(M===m&&m.host&&!m.echo)relayFail(m.code)},8000);
+  if(!m)return;
+  m.seen={};m.since='30s';
+  if(m.host){m.ready=true;drawWait();pulse();m.pulse=every(pulse,3000)}
+  poll(m);
+  later(function(){if(M===m&&m.host&&!m.echo)relayFail(m.code)},10000);
 }
 
 function drawFriend(msg,code){
@@ -536,7 +552,7 @@ function joinRoom(code,key){
   openRelay();
   later(function(){
     if(!M||M.host||M.opp)return;
-    drawFriend(M.sawHost?'Could not connect. Ask your friend to keep the room page open, then try again.':'Room not found. Check the code, and ask your friend to keep the room page open.',code);
+    drawFriend(!M.netOk?'Cannot reach the connection server. Check your internet and try again.':M.sawHost?'Could not connect. Ask your friend to keep the waiting screen open, then try again.':'Room not found. On the computer, stay on the waiting screen and send a new link.',code);
   },12000);
 }
 
