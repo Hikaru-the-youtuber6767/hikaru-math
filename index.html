@@ -450,30 +450,34 @@ function takeWrap(m,wrap){
   onWrap(wrap,m);
 }
 function listen(m){
-  if(typeof EventSource==='undefined')return;
-  try{
-    var es=new EventSource(m.base+'/'+topicOf(m.code)+'/sse');
-    m.es=es;
-    es.onopen=function(){if(M===m){m.sseOk=true;m.netOk=true;m.sseErr=0}};
-    es.onmessage=function(ev){
-      if(!M||M!==m)return;
-      m.sseOk=true;m.netOk=true;m.sseErr=0;
-      var wrap;try{wrap=JSON.parse(ev.data)}catch(e){return}
-      takeWrap(m,wrap);
-    };
-    es.onerror=function(){
-      if(M!==m)return;
-      m.sseOk=false;
-      m.sseErr=(m.sseErr||0)+1;
-      if(m.sseErr>=5){try{es.close()}catch(e){}if(m.es===es)m.es=null}
-    };
-  }catch(e){}
+  if(typeof EventSource==='undefined'||m.es)return;
+  var es;
+  try{es=new EventSource(m.base+'/'+topicOf(m.code)+'/sse')}catch(e){return}
+  m.es=es;
+  es.onopen=function(){if(M===m)m.netOk=true};
+  es.onmessage=function(ev){
+    if(!M||M!==m)return;
+    m.lastSse=Date.now();m.netOk=true;m.sseErr=0;
+    var wrap;try{wrap=JSON.parse(ev.data)}catch(e){return}
+    takeWrap(m,wrap);
+  };
+  es.onerror=function(){
+    if(M!==m)return;
+    m.sseErr=(m.sseErr||0)+1;
+    if(m.sseErr<3)return;
+    m.lastSse=0;
+    try{es.close()}catch(e){}
+    if(m.es===es)m.es=null;
+  };
 }
 function poll(m){
   if(!M||M!==m||m.polling)return;
   if(m.slowUntil&&Date.now()<m.slowUntil)return;
-  m.pollN=(m.pollN||0)+1;
-  if(m.sseOk&&m.pollN%5!==0)return;
+  var fresh=m.lastSse&&Date.now()-m.lastSse<10000;
+  if(m.opp){
+    m.quiet=(m.quiet||0)+1;
+    if(m.quiet%(fresh?5:3)!==0)return;
+  }
   m.polling=true;
   var ac=typeof AbortController!=='undefined'?new AbortController():null;
   var killer=setTimeout(function(){try{if(ac)ac.abort()}catch(e){}},4500);
@@ -481,7 +485,7 @@ function poll(m){
   var opts={cache:'no-store'};
   if(ac)opts.signal=ac.signal;
   fetch(m.base+'/'+topicOf(m.code)+'/json?poll=1&since='+encodeURIComponent(since)+'&x='+Date.now(),opts).then(function(r){
-    if(r.status===429){if(M===m)m.slowUntil=Date.now()+10000;return ''}
+    if(r.status===429){if(M===m){m.slowUntil=Date.now()+10000;m.netOk=true}return ''}
     if(r.status===404||r.status===204)return '';
     if(!r.ok)throw new Error('bad');
     return r.text();
@@ -496,7 +500,7 @@ function poll(m){
       takeWrap(m,wrap);
     });
   }).catch(function(){
-    if(!M||M!==m||m.sseOk)return;
+    if(!M||M!==m||m.lastSse)return;
     if(!m.netOk){m.pfail=(m.pfail||0)+1;if(m.pfail>=6)relayFail(m.code)}
   }).then(function(){clearTimeout(killer);if(M===m)m.polling=false});
 }
@@ -508,7 +512,7 @@ function beginRelay(){
   if(m.host){m.ready=true;drawWait();pulse();m.pulse=every(pulse,3000)}
   listen(m);
   poll(m);
-  m.pollTimer=setInterval(function(){poll(m)},4000);
+  m.pollTimer=setInterval(function(){poll(m)},2500);
   later(function(){if(M===m&&m.host&&!m.echo)relayFail(m.code)},10000);
 }
 function chooseRelay(i){
@@ -619,7 +623,7 @@ function joinRoom(code,key){
   later(function(){
     if(!M||M.host||M.opp)return;
     drawFriend(!M.netOk?'Cannot reach the connection server. Check your internet and try again.':M.sawHost?'Could not connect. Ask your friend to keep the waiting screen open, then try again.':'Room not found. On the computer, stay on the waiting screen and send a new link.',code);
-  },12000);
+  },18000);
 }
 
 function onData(d){
