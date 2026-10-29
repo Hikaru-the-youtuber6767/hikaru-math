@@ -373,7 +373,8 @@ function finishBattle(){
   stopAll();app.innerHTML=h;
 }
 
-/* online friend battle: messages go through ntfy.sh so a PC and a phone can reach each other */
+/* online friend battle: short messages go through a public ntfy server both devices can reach */
+var RELAYS=['https://ntfy.envs.net','https://ntfy.adminforge.de','https://ntfy.mzte.de'];
 function esc(s){return String(s).replace(/[&<>"']/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
 function cleanName(s){s=String(s==null?'':s).replace(/[\u0000-\u001f]/g,'').trim().slice(0,12);return s||'Player'}
 function myName(){return cleanName(save.name)}
@@ -384,19 +385,19 @@ function leaveRoom(){
   if(!M||!M.code)return;
   var m=M;M=null;
   if(!m.id)return;
-  try{fetch('https://ntfy.sh/'+topicOf(m.code),{method:'POST',body:JSON.stringify({t:'bye',from:m.id,sid:m.sid||''}),keepalive:true})}catch(e){}
+  try{fetch((m.base||RELAYS[0])+'/'+topicOf(m.code),{method:'POST',body:JSON.stringify({t:'bye',from:m.id,sid:m.sid||''}),keepalive:true})}catch(e){}
 }
 function post(o,cb){
   if(!M){if(cb)cb(false);return}
   if(!o.from)o.from=M.id;
   if(!o.sid)o.sid=M.sid;
-  var url='https://ntfy.sh/'+topicOf(M.code),body=JSON.stringify(o);
+  var url=(M.base||RELAYS[0])+'/'+topicOf(M.code),body=JSON.stringify(o);
   fetch(url,{method:'POST',body:body,keepalive:true}).then(function(r){if(cb)cb(!!r.ok)},function(){if(cb)cb(false)});
 }
 function send(o){post(o)}
 function roomLink(){
   var u=location.href.split('#')[0].split('?')[0];
-  return u+'?room='+M.code+'&k='+M.sid;
+  return u+'?room='+M.code+'&k='+M.sid+'&s='+(M.srv||0);
 }
 function relayFail(code){drawFriend('Cannot reach the connection server. Check your internet and try again.',code)}
 function pulse(){
@@ -439,8 +440,9 @@ function onWrap(wrap,m){
 }
 function poll(m){
   if(!M||M!==m)return;
-  var url='https://ntfy.sh/'+topicOf(m.code)+'/json?poll=1&since='+encodeURIComponent(m.since||'30s')+'&x='+Date.now();
+  var url=(m.base||RELAYS[0])+'/'+topicOf(m.code)+'/json?poll=1&since='+encodeURIComponent(m.since||'30s')+'&x='+Date.now();
   fetch(url,{cache:'no-store'}).then(function(r){
+    if(r.status===404||r.status===204)return '';
     if(!r.ok)throw new Error('bad');
     return r.text();
   }).then(function(text){
@@ -464,13 +466,40 @@ function poll(m){
     later(function(){poll(m)},1500);
   });
 }
-function openRelay(){
+function beginRelay(){
   var m=M;
-  if(!m)return;
+  if(!m||!m.base||m.started)return;
+  m.started=true;
   m.seen={};m.since='30s';
   if(m.host){m.ready=true;drawWait();pulse();m.pulse=every(pulse,3000)}
   poll(m);
   later(function(){if(M===m&&m.host&&!m.echo)relayFail(m.code)},10000);
+}
+function chooseRelay(i){
+  var m=M;
+  if(!m)return;
+  if(i>=RELAYS.length){relayFail(m.code);return}
+  var ac=typeof AbortController!=='undefined'?new AbortController():null;
+  var timer=setTimeout(function(){try{if(ac)ac.abort()}catch(e){}},3000);
+  var opts={cache:'no-store'};
+  if(ac)opts.signal=ac.signal;
+  fetch(RELAYS[i]+'/'+topicOf(m.code)+'/json?poll=1&since=5s&x='+Date.now(),opts).then(function(r){
+    clearTimeout(timer);
+    if(!(r.ok||r.status===404||r.status===204))throw new Error('bad');
+    if(M!==m||m.started)return;
+    m.base=RELAYS[i];m.srv=i;
+    beginRelay();
+  }).catch(function(){
+    clearTimeout(timer);
+    if(M!==m||m.started)return;
+    chooseRelay(i+1);
+  });
+}
+function openRelay(){
+  var m=M;
+  if(!m)return;
+  if(m.base)beginRelay();
+  else chooseRelay(0);
 }
 
 function drawFriend(msg,code){
@@ -547,7 +576,8 @@ function createRoom(l){
 }
 function joinRoom(code,key){
   stopAll();
-  M={host:false,code:code,live:false,submit:submitM,id:rid(),sid:'',expect:key||'',sawHost:false};
+  var pinned=invite.room===code&&invite.srv!=null&&RELAYS[invite.srv]?invite.srv:null;
+  M={host:false,code:code,live:false,submit:submitM,id:rid(),sid:'',expect:key||'',sawHost:false,base:pinned!=null?RELAYS[pinned]:'',srv:pinned};
   app.innerHTML='<main class="screen">'+top('multi')+'<div class="card center"><div class="spin" role="status" aria-label="Joining"></div><h2>Joining room '+code+'…</h2></div></main>';
   openRelay();
   later(function(){
@@ -737,7 +767,8 @@ function pageRoom(){
   var q=location.search||'',h=location.hash||'';
   var room=(/[?&]room=(\d{4})/.exec(q)||/room=(\d{4})/.exec(h)||[])[1]||'';
   var key=(/[?&]k=([a-z0-9]+)/.exec(q)||[])[1]||'';
-  return {room:room,key:key};
+  var srv=/[?&]s=(\d)/.exec(q);
+  return {room:room,key:key,srv:srv?+srv[1]:null};
 }
 var invite=pageRoom();
 if(invite.room)drawFriend('',invite.room);else drawHome();
